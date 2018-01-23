@@ -1,0 +1,98 @@
+---
+title: "HW2 - Naive Bayes"
+author: "William Morgan"
+date: "January 23, 2018"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F)
+
+libs <-  c("tidyverse", "e1071", "tm", "SnowballC", "knitr")
+lapply(libs, library, character.only = T)
+```
+
+## Problems
+1. Tune the `laplace` smoothing parameter to find the best Naive Bayes Classifier
+for the `sms_spam` dataset
+
+2. Naive Bayes Classification with a numeric $x$
+
+***
+
+### 1 : Tuning the `laplace` parameter
+
+```{r Load, prepare data}
+sms <-  read.csv("Data/sms_spam.csv", stringsAsFactors = F) %>%
+  mutate(type = as.factor(type))
+
+ham_spam <-  sms$type
+
+sms_C <- VCorpus(VectorSource(sms$text)) %>%
+  tm_map(content_transformer(tolower)) %>%
+  tm_map(removeNumbers) %>%
+  tm_map(removeWords, stopwords()) %>%
+  tm_map(removePunctuation) %>%
+  tm_map(stemDocument) %>%
+  tm_map(stripWhitespace)
+
+sms_dtm <-  DocumentTermMatrix(sms_C)
+```
+
+```{r train/test split}
+nbTuning <-  function(DocTermMatrix, labels, train_prop = .75, laplace = 0){
+  ########
+  # Split the document term matrix into training/testing set
+  #
+  ## DocTermMatrix should be properly cleaned beforehand
+  ## Labels will be the factor vector of your dependent variable
+  #
+  ########
+  
+  # Create index to split original data on
+  num_train <- floor(DocTermMatrix$nrow * train_prop)
+  train_index <- sample(1:DocTermMatrix$nrow, num_train)
+  
+  # Split based on index
+  train <-  DocTermMatrix[train_index, ]
+  test <- DocTermMatrix[-train_index, ]
+
+  train_y <- labels[train_index]
+  test_y <- labels[-train_index]
+  
+  # Subset to exclude words mentioned less than 5 times
+  freq_words <-  findFreqTerms(train, 5)
+  train <-  train[, freq_words]
+  test <- test[, freq_words]
+  
+  # Convert counts to binary
+  countToBin <-  function(x) {
+    x <-  if_else(x > 0, "Yes", "No")
+  }
+  
+  train <-  apply(train, MARGIN = 2, countToBin)
+  test <-  apply(test, MARGIN = 2, countToBin)
+  
+  NB <-  naiveBayes(train, train_y, laplace = laplace)
+  
+  yhat <-  predict(NB, test)
+  
+  error <-  1 - sum(yhat == test_y) / length(test_y)
+  return(error)
+}
+```
+
+```{r, echo = T}
+lap_range <-  c(0, .01, .1, 1, 5, 10, 20, 50)
+
+errors <- double(length = length(lap_range))
+
+for (i in seq_along(lap_range)) {
+  errors[i] <-  nbTuning(sms_dtm, sms$type, laplace = lap_range[i])
+}
+```
+
+```{r results table}
+kable(data.frame(laplace_value = lap_range, error = errors),
+      format = 'latex')
+```
