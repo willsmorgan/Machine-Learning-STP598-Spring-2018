@@ -40,56 +40,71 @@ sms_dtm <-  DocumentTermMatrix(sms_C)
 ```
 
 ```{r train/test split}
-nbTuning <-  function(DocTermMatrix, labels, train_prop = .75, laplace = 0){
+nbTuning <-  function(DocTermMatrix, labels, train_prop = .75, laplace = 0, samples = 5){
   ########
-  # Split the document term matrix into training/testing set
+  # Split DTM, run NB and catalog error rate
   #
   ## DocTermMatrix should be properly cleaned beforehand
   ## Labels will be the factor vector of your dependent variable
   #
   ########
   
-  # Create index to split original data on
-  num_train <- floor(DocTermMatrix$nrow * train_prop)
-  train_index <- sample(1:DocTermMatrix$nrow, num_train)
+  samples_left <- samples
+  errors <- double()
   
-  # Split based on index
-  train <-  DocTermMatrix[train_index, ]
-  test <- DocTermMatrix[-train_index, ]
-
-  train_y <- labels[train_index]
-  test_y <- labels[-train_index]
+  while (samples_left > 0){  
+    # Create index to split original data on
+    num_train <- floor(DocTermMatrix$nrow * train_prop)
+    train_index <- sample(1:DocTermMatrix$nrow, num_train)
+    
+    # Split based on index
+    train <-  DocTermMatrix[train_index, ]
+    test <- DocTermMatrix[-train_index, ]
   
-  # Subset to exclude words mentioned less than 5 times
-  freq_words <-  findFreqTerms(train, 5)
-  train <-  train[, freq_words]
-  test <- test[, freq_words]
-  
-  # Convert counts to binary
-  countToBin <-  function(x) {
-    x <-  if_else(x > 0, "Yes", "No")
+    train_y <- labels[train_index]
+    test_y <- labels[-train_index]
+    
+    # Subset to exclude words mentioned less than 5 times
+    freq_words <-  findFreqTerms(train, 5)
+    train <-  train[, freq_words]
+    test <- test[, freq_words]
+    
+    # Convert counts to binary
+    countToBin <-  function(x) {
+      x <-  if_else(x > 0, "Yes", "No")
+    }
+    
+    train <-  apply(train, MARGIN = 2, countToBin)
+    test <-  apply(test, MARGIN = 2, countToBin)
+    
+    NB <-  naiveBayes(train, train_y, laplace = laplace)
+    
+    yhat <-  predict(NB, test)
+    
+    error <-  1 - sum(yhat == test_y) / length(test_y)
+    errors <-  c(errors, error)
+    
+    samples_left <-  samples_left - 1
   }
-  
-  train <-  apply(train, MARGIN = 2, countToBin)
-  test <-  apply(test, MARGIN = 2, countToBin)
-  
-  NB <-  naiveBayes(train, train_y, laplace = laplace)
-  
-  yhat <-  predict(NB, test)
-  
-  error <-  1 - sum(yhat == test_y) / length(test_y)
-  return(error)
+
+  mean_error <-  mean(errors)
+
+  return(mean_error)
 }
 ```
 
 ```{r, echo = T}
-lap_range <-  c(0, .01, .1, 1, 5, 10, 20, 50)
+lap_range <-  c(0, .01, .1, .5, .75, 1, 5, 10)
 
 errors <- double(length = length(lap_range))
 
 for (i in seq_along(lap_range)) {
-  errors[i] <-  nbTuning(sms_dtm, sms$type, laplace = lap_range[i])
+  errors[i] <-  nbTuning(sms_dtm, sms$type, laplace = lap_range[i], samples = 5)
 }
+
+data.frame(lap_range, errors) %>%
+  ggplot(aes(lap_range, errors)) +
+  geom_line()
 ```
 
 ```{r results table}
