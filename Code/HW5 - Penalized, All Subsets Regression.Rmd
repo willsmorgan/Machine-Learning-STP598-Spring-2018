@@ -1,0 +1,811 @@
+---
+title: "HW5 - Penalized, All Subsets Regression"
+author: "William Morgan, Mitch O'Brien, Jared Scolaro"
+date: "March 9, 2018"
+output:
+  pdf_document:
+    toc: yes
+    toc_depth: 2
+---
+
+```{r setup, include=FALSE}
+rm(list = ls())
+set.seed(1)
+knitr::opts_chunk$set(echo = F, fig.align = 'center',
+                      fig.height = 3.5, fig.width = 5, warning = F)
+
+libs <-  c('tidyverse', 'leaps', 'glmnet', 'caret', 'purrr', 'gridExtra',
+           'doParallel')
+
+lapply(libs, library, character.only = T)
+```
+
+***
+
+## 1. Data with 5 $x$'s
+
+Use `leaps::regsubsets` and the lasso to see what variable subsets they select
+
+```{r import sim data}
+data <- read_csv('Data/sim-reg-data.csv', col_types = cols())
+
+regsubsets(y ~., data) %>%
+  summary() %>%
+  magrittr::extract2('which')
+
+X <- model.matrix(as.formula(y ~.), data)[, -1]
+Y <- as.matrix(data[, 1])
+cv.glmnet(X, Y) %>%
+  coef(s = 'lambda.min')
+
+# clean up workspace
+rm(X,Y)
+```
+
+
+`leaps::regsubsets` selects all five variables, while the lasso only excludes $x4$
+
+
+\newpage
+
+## 2. Used Cars Data, Lasso vs. Step/All subsets
+
+### Outline:
+
+We begin the second half of this homework with a restatement of the problem,
+followed by a quick description of the data and an exploratory analysis to get
+a firm grasp on the available information. Next, we discuss our methods for
+preprocessing the data, including any cleaning and feature engineering, before
+moving on to model selection techniques. This question concludes with model
+evaluation and the selection of the best performing model. 
+
+
+### Problem:
+
+Build a linear model to predict the price of a used car using penalized
+regression and stepwise/all subsets selection methods. Evaluate the models from
+each methodology and determine which gives the most accurate predictions.
+
+
+### Data Description: 
+
+We use the `usedcars.csv` data set on the course web page to build the models, which
+contains descriptions of about 20,000 used cars. There are three continuous fields,
+`displacement` and `mileage`, and `price`. `displacement` measures the combined
+swept volume of the pistons inside the cylinders of an engine and can be seen as
+a measure of engine power, and `mileage` is simply the existing mileage on the
+car at the time of purchase. `price` is measured in USD. Other fields in the data
+set include `trim`, `isOneOwner`, `year`, `color`, `fuel`, `region`, `soundSystem`, 
+and `wheelType`.
+
+Most of the categorical variables are self-explanatory, so we won't 
+define them here. `trim` isn't as obvious for non-car enthusiasts, so we looked 
+up a basic explanation of it: "Trim levels identify a vehicle by a set of special
+features. Higher trim levels add to the base model features or replace them with
+something else.." (edmunds.com). Also, `trim` values containing "AMG" is apparently
+a trim option from Mercedes-Benz that are tuned in a specific way to upgrade 
+the power of the car (mercedesbenznaples.com)
+
+```{r load used cars, echo = FALSE}
+data <- read_csv('Data/usedcars.csv', col_types = cols()) %>%
+  mutate_if(is.character, as.factor) %>%
+  mutate(year = factor(year))
+
+```
+
+### Exploratory Analysis:
+
+The primary purpose of this analysis is to evaluate the quality of the variables
+included in the data set. Specifically, we want to observe their distributions
+and verify that they are appropriate to use in a regression scenario. We do not
+anticipate to find any problems with the continuous variables that would warrant
+exclusion, but we believe there might be some issues with the categorical variables. 
+Namely, we want to avoid variables that 'pile up' in one level of a factor instead
+of being evenly distributed amongst the classes. This might become an issue
+when we are splitting the data and doing any sort of k-fold CV, because we could
+by chance end up with folds that have no observations for the minority class
+within a particular variable.
+
+A less important (but still relevant) goal of this analysis is to look for 
+observations that should be dropped from the data. As this was already prepared
+by someone else, it is unlikely any dramatic changes will have to be made.
+
+Finally, we use this section to create a couple of visualizations and
+cross-tabulations to inform which variables and interactions might be relevant in
+modeling price.
+
+We begin by looking at frequency counts for the non-numeric variables:
+
+```{r freq tables}
+data %>%
+  select_if(is.factor) %>%
+  summary()
+
+```
+
+
+More than 95% of the observations in the data have `fuel = 'Gasoline'`, so that 
+will certainly cause some problems when we split up the data. `trim` and
+`wheelType` also have lopsided distributions, but not as nearly as bad as `fuel`.
+We have almost on observations with `soundSystem = Bang Olufsen`, so it would be 
+wise to drop those observations to avoid the problem we described earlier. 
+Further investigation is needed for variables with values of `unsp` because it 
+is not immediately clear what that signifies. It is especially important for
+`soundSystem` because `unsp` is the majority class of that variable. 
+
+Let's now inspect the continuous variables with some histograms. We adjust
+`mileage` to be reported in thousands of dollars and miles (resp.) for easier
+interpretation.
+
+`price` is log-transformed for the same reason, and we will keep `price` in this
+form for modeling as well. 
+
+```{r cont var hists, fig.width = 10, warnings = FALSE}
+price_graph <- ggplot(data, aes(log(price))) +
+  geom_histogram(binwidth = .25) +
+  ggtitle("Price") + 
+  theme(plot.title = element_text(hjust = .5))
+
+mileage_graph <- ggplot(data, aes(mileage / 1000)) +
+  geom_histogram(binwidth = 25) +
+  ggtitle("Mileage") +
+  theme(plot.title = element_text(hjust = .5))
+
+displacement_graph <- ggplot(data, aes(displacement)) +
+  geom_histogram(binwidth = .2) +
+  ggtitle("Displacement") + 
+  theme(plot.title = element_text(hjust = .5))
+
+grid.arrange(price_graph, mileage_graph, displacement_graph, nrow = 1)
+rm(price_graph, mileage_graph, displacement_graph)
+```
+We mainly want to identify outliers with these plots. `price` appears to have very
+few on the low end but for the most part seems reasonable. `mileage` on the other
+hand has some on the far right of the distribution. Finally, `displacement` does 
+not appear to be continuously distributed, so it will likely serve better as a 
+categorical variable. 
+
+Before moving on, we will look at the observations containing these outliers to
+briefly check if they appear to be reporting errors or actual sales. We will wait 
+on factorizing `displacement` and do it in the preprocessing section.
+
+_Price outliers:_
+```{r check price outliers}
+# price
+data %>%
+  arrange(price) %>%
+  head(n = 10) %>%
+  dplyr::select(price, everything())
+```
+
+
+_Mileage outliers:_
+```{r check mileage outliers}
+# mileage
+data %>%
+  arrange(desc(mileage)) %>%
+  head(n = 10) %>%
+  dplyr::select(mileage, everything())
+```
+
+There doesn't seem to be anything out of place with either set of outliers (although
+the `mileage` outliers seem extremely large), so we will keep them in the data set.
+
+In summary, the data is by and large ready to be processed for modeling. The only
+problems we found were the very low variation in `fuel` and the `unsp` values
+in a couple of the columns. We remedy the first by deleting the column altogether,
+and we discuss our approach to dealing with the irregular values in the following
+section.
+
+We conclude this section with a quick investigation into possible interactions
+and higher-order relationships to include in the model. For brevity we have
+excluded some of the cross-tabulations we thought were unimportant for the report.
+
+_Investigating Interactions:_
+
+- The first interaction to check is `year` and `trim`. The figure below plots
+the relationship between price, year, and trim. Points on the figure represent
+class means for a given year. As expected, higher trim values are associated
+with higher sell prices. This plot reveals that certain trim values only exist
+within a given time frame. 65 AMG for instance was seemed to be introduced in 2005,
+having no observations before that time. This suggests that we should not use the 
+interaction in the regression, as there would be many instances of entire columns
+of interactions being completely zero. 
+
+```{r trim year int}
+ggplot(data,aes(year,log(price), color = trim))+
+  #geom_point()+
+  stat_summary(fun.y = mean, geom = "point", size = 2)+
+  geom_hline(yintercept = 10)+
+  geom_vline(xintercept = 1999)+
+  ggtitle("Price by Year and Trim")+
+  theme(plot.title = element_text(hjust = .5)) +
+  theme(axis.text.x = element_text(angle = 45, vjust = .75))
+
+```
+
+
+- We now check the interaction between `mileage` and `trim`. To make the
+relationships a bit more obvious we've used smoothing curves for each trim
+style instead of points. These reveal clear differences in selling prices for 
+different trims at a given mileage, so we should include this interaction.
+
+
+```{r mileage trim int, warning=FALSE}
+ggplot(data,aes(mileage,log(price),color = trim))+
+  #geom_point()+
+  geom_smooth(se = FALSE, method = 'loess', size = 1)+
+  ggtitle("Price by Mileage and Trim")+
+  theme(plot.title = element_text(hjust = .5))
+```
+
+
+- For the same reason as the above interaction, we have evidence to include
+an interaction between `mileage` and `displacement` in our model.
+
+```{r mileage displacement int, warning=FALSE}
+ggplot(data, aes(mileage,log(price),color = as.factor(displacement)))+
+  #geom_point()+
+  scale_color_discrete("displacement")+
+  geom_smooth( se = FALSE, method = 'loess', size = 1)+
+  ggtitle("Price by Mileage and Displacement")+
+  theme(plot.title = element_text(hjust = .5))
+```
+
+
+- Our next pair of variables to check is `region` and `trim`. We would have 
+support for their interaction being included in the model if price varied
+significantly for a given trim across regions, but that does not seem to be the
+case. For example, for `trim = 600` we can see that the price is pretty consistent
+across region. Hence, adding the region for a given trim style does not reveal any
+more information about the selling price. 
+
+
+```{r}
+ggplot(data, aes(region, log(price), color = trim))+
+  stat_summary(fun.y = mean, geom = "point", size = 2)+
+  ggtitle("Price by region")+
+  theme(plot.title = element_text(hjust = .5))
+```
+
+
+- The final interaction we will check for is `isOneOWner` and `color`. This plot
+does not give much support for putting the interaction in, as the slope for each
+color moving from `isOneOwner = F` to `isoneOwner = T` appears to be the same
+across most colors. In any case, it might be worth considering including anyway.
+
+```{r}
+ggplot(data, aes(isOneOwner, log(price), color = color))+
+  #geom_point()+
+  stat_summary(fun.y = mean, geom = "point", size = 2)+
+  ggtitle("Price by IsOneOwner and Color")+
+  theme(plot.title = element_text(hjust = .5))
+```
+
+
+_Higher Order Terms_
+
+- The only continuous value we are using in the regression is `mileage`, so we plot
+$mileage^2$ to see if there is evidence to include it in the model. We also 
+checked its cubic form, but have excluded it here because there was no meaningful
+relationship. Based on the plot it seems that there is at least some relation, 
+so we will include it in the model.
+
+```{r}
+data %>% filter(mileage^2 < 1e11) %>%
+  ggplot(aes(mileage^2, log(price)))+
+  geom_point()+
+  ggtitle("Price by displacement")+
+  theme(plot.title = element_text(hjust = .5))
+```
+
+
+In short, the extra terms we think are worth including are:
+
+- `mileage` and `trim`
+
+- `mileage` and `displacement`
+
+- `color` and `isOneOwner` (maybe)
+
+- `mileage^2`
+
+### Preprocessing
+
+As we noted earlier, `fuel` does not seem like an appropriate variable to include
+in the models because of its poor variation. For the same reason, observations with `soundSystem`
+values of `Bang Olufsen` will be dropped. In addition, the `unsp` values present
+a difficult problem. Assuming that this value means "unspecified", the interpretation
+of any coefficients containing this variable won't be very meaningful. It could 
+very well be the case that two cars reporting `unsp` for `soundSystem` have entirely
+different sound systems in reality. If that were the case, any signal we were trying
+to extract would be drowned out. An obvious solution is to drop any observations
+containing this value, however this would amount to dropping a significant portion
+of the data. On the other hand, our goal isn't finding an accurate description
+of the relationship. Rather, we just want to build the best predictive model. So,
+we will move forward by duplicating our data and running two of the same analyses -
+one on the entire data set and one on the data set with no `unsp` values. This
+will allow us to move forward without sacrificing a majority of the data and also
+investigate the amount of noise `unsp` adds. 
+
+Once we drop `fuel`, factorize `displacement`, and create the subset without
+`unsp` values, we can set up the data for modeling. This will entail splitting
+the data into training/testing sets, centering and scaling the continuous columns, 
+and deciding on formulas to use. 
+
+Our training/testing split will be the standard 80/20 split. We go about making
+This is done with the use of `caret::createDataPartition`, which allows us to 
+split our data based on the distribution of the outcome variable `price`. We scale
+both sets of data by the sample means and standard errors of the training set.
+
+The only 'feature engineering' we will do on this data set is to collapse the
+`year` into larger categories in order to reduce the number of coefficients we
+will have to estimate. This will speed up computation considerably because `year`
+already has 20 levels and we won't be sacrificing much in terms of interpretability
+if we condense that a little bit. (After checking it out, this reduces the number
+of estimates from 1500 to 840 in the 'interact everything' model). The new
+levels of `year` will be:
+
+- anything before and including 2000
+
+- 2001-2005
+
+- 2006-2009
+
+- 2010-2013
+
+
+```{r drop fuel and split irreg}
+# drop fuel
+data <- data %>%
+  filter(soundSystem != "Bang Olufsen") %>%
+  dplyr::select(-fuel) %>%
+  mutate(displacement = factor(displacement),
+         lprice = log(price)) %>%
+  dplyr::select(-price)
+
+data$year <- fct_collapse(data$year,
+                          before_2000 = c("1994", "1995", "1996", "1997", "1998",
+                                          "1999", "2000"),
+                          between_01_05 = c("2001", "2002", "2003", "2004", "2005"),
+                          between_06_09 = c("2006", "2007", "2008", "2009"),
+                          after_09 = c("2010", "2011", "2012", "2013"))
+
+# create second data set
+data_wo_irreg <- data %>%
+  filter_all(all_vars(. != 'unsp')) %>%
+  mutate_if(is.factor, factor) # re-factorize variables to exclude `unsp` level
+
+```
+
+```{r splitScale}
+splitScale <- function(data, y) {
+  
+  #### Function to take input data and a dependent variable name and then split
+  #### into training/testing/validation sets. Once the sets are created, they 
+  #### are centered/scaled according to the training data. The validation data
+  #### is then saved so that it can be used later
+  
+  ### SPLIT
+  indices <- createDataPartition(pull(data, y),
+                                 p = .8,
+                                 list = FALSE)
+
+  train <- data[indices, ] # combination of training set and validation
+  test <- data[-indices, ]
+  
+  # center just the Y column before scaling/centering mileage
+  centering <- mean(pull(train, y))
+  
+  train[, y] <- train[, y] - centering
+  test[, y] <- test[, y] - centering
+  
+  # center and scale X
+  centering <- mean(pull(train, mileage))
+  
+  train[, 'mileage'] <- train[, 'mileage'] - centering
+  test[, 'mileage'] <- test[, 'mileage'] - centering 
+  
+  scaling <- sqrt(sum(train$mileage^2) / length(train$mileage))
+  
+  train[, 'mileage'] <- train[, 'mileage'] / scaling
+  test[, 'mileage'] <- test[, 'mileage'] / scaling
+  model_data <- list('train' = train, 'test' = test)
+  
+  return(model_data)
+  
+}
+
+data_full <- splitScale(data, "lprice")
+
+full_train <- data_full$train
+full_test <- data_full$test
+
+data_sub <- splitScale(data_wo_irreg, "lprice")
+
+sub_train <- data_sub$train
+sub_test <- data_sub$test
+
+rm(data_full, data_sub)
+```
+
+### Model Selection and Estimation:
+
+We take two approaches to feature selection: a data-informed perspective on
+important features and a 'kitchen sink' method. We were able to gain some insight
+on the relations between price and various columns in the data, giving us a list
+of extra terms that seemed relevant to include. On the other hand, the low dimensionality of the original data 
+means that we can be pretty liberal in deciding what to include before we start 
+running into computational issues. So, we will run a set of models based on 
+our initial findings from the previous sections, and a set of models that are
+much broader and less founded in the data. 
+
+We first define the everything we need for the penalized regression. For any given
+formula, our goal is to run the cross-validated `glmnet` function with
+$\alpha = {0, .5, 1}$ (ridge, enet, lasso), create predictions for each model,
+and calculate the root mean square error. This function, called `glmnetPrediction`,
+will take a formula in the form of a string (this is done to easily keep track of
+it), the training data frames, and the testing data frames. The actual code is not included in this
+report to save space. Next, we repeat the same thing for the stepwise selection.
+It will have the same basic setup: for a given formula, run the algorithm, find
+the best model, and report the test error.
+
+
+```{r glmnet setup}
+glmnetPrediction <- function(formula, train, test){
+
+  # Given a formula, run Enet, Lasso, and Ridge and then report RMSE
+  # of each model along with the formula. Each formula that is run
+  # will result in a 1-observation df with 4 columns
+
+  getfolds = function(nfold,n,dorand=TRUE) {
+    fs = floor(n/nfold) # fold size
+    fid = rep(1:nfold,rep(fs,nfold))
+    diff = n-length(fid)
+    if(diff>0) fid=c(1:diff,fid)
+    if(dorand) fid = sample(fid,n)
+    return(fid)
+  }
+  
+  trainY <- train$lprice
+  testY <- test$lprice
+  
+  foldids <- getfolds(10, length(trainY))
+  
+  trainX <- model.matrix(as.formula(formula), train)[, -1]
+  testX <- model.matrix(as.formula(formula), test)[, -1]
+  
+  cl <- makeCluster(detectCores() - 2)
+  registerDoParallel(cl)
+  
+  ridge_fit <- cv.glmnet(trainX, trainY, foldid = foldids,
+                         family = 'gaussian', standardize = FALSE,
+                         alpha = 0)
+  lasso_fit <- cv.glmnet(trainX, trainY, foldid = foldids,
+                         family = 'gaussian', standardize = FALSE,
+                         alpha = 1)
+  enet_fit <- cv.glmnet(trainX, trainY, foldid = foldids,
+                         family = 'gaussian', standardize = FALSE,
+                         alpha = 0.5)  
+  
+  stopCluster(cl)
+  
+  ridge_preds <- predict(ridge_fit, testX, s ='lambda.min')
+  lasso_preds <- predict(lasso_fit, testX, s = 'lambda.min')
+  enet_preds <- predict(enet_fit, testX, s = 'lambda.min')
+  
+  predictions <- data.frame(ridge_preds,
+                            lasso_preds,
+                            enet_preds,
+                            testY)
+  names(predictions) <- c("ridge", "lasso", "enet", "actual")
+  
+  ridge_error <- sqrt(mean((predictions$ridge - predictions$actual)^2))
+  lasso_error <- sqrt(mean((predictions$lasso - predictions$actual)^2))
+  enet_error <- sqrt(mean((predictions$enet - predictions$actual)^2))
+  
+  results <- list('ridge' = ridge_error, 'lasso' = lasso_error,
+                  'enet' = enet_error, 'formula' = formula)
+
+  return(results)
+}
+
+
+```
+
+
+```{r stepwise setup}
+stepwisePrediction <- function(formula, train, test) {
+  ## Depending on the size model matrix, run exhaustive subset search
+  ## or forward selection
+  
+  trainY <- train$lprice
+  testY <- test$lprice
+  
+  trainX <- model.matrix(as.formula(formula), train)
+  testX <- model.matrix(as.formula(formula), test)
+  
+  # use regsubsets if less than 50 predictors
+  if (dim(trainX)[2] <= 50) {
+    
+    # run the model
+    suppressMessages(model <- regsubsets(as.formula(formula),
+                        train,
+                        method = 'exhaustive',
+                        nvmax = dim(trainX)[2]))
+    
+    P <- dim(summary(model)$which)[1]
+    
+    rmse = rep(0, P)
+    
+    for (k in 1:P){
+      coef_k = coef(model, id = k)
+      
+      x_vars = names(coef_k)
+      pred = testX[, x_vars] %*% coef_k
+      
+      rmse[k] = sqrt(mean((testY - pred)^2))
+    }
+    
+  } else {
+    
+    # run stepwise forward selection
+    suppressMessages(model <- regsubsets(as.formula(formula),
+                        train,
+                        method = 'forward',
+                        nvmax = dim(trainX)[2]))
+    
+    P <- dim(summary(model)$which)[1]
+    
+    rmse = rep(0, P)
+    
+    for (k in 1:P){
+      coef_k = coef(model, id = k)
+      
+      x_vars = names(coef_k)
+      pred = testX[, x_vars] %*% coef_k
+      
+      rmse[k] = sqrt(mean((testY - pred)^2))
+    }
+  }
+  
+  minimum_index = which.min(rmse)
+  minimum_rmse = min(rmse)
+  
+  return(minimum_rmse)
+}
+```
+
+Once the regression architecture is set up, we can test it by 
+defining a ton of formulas and shoving it through the functions we just defined.
+This should give us some preliminary results on which formulas will work best.
+To be explicit, we include the formulas we decided to test in the following code
+chunk
+
+```{r formula definition, echo = TRUE}
+# define formulas and vectorize
+f0 <- 'lprice ~ mileage + trim'                 # Example model (for testing code)
+f1 <- 'lprice ~ .'                       # ALL
+f2 <- 'lprice ~ .+I(mileage^2)'          # ALL + mileage^2
+f3 <- 'lprice ~.+I(mileage^3)'           # ALL + mileage^2
+f4 <- 'lprice ~.+I(1/mileage)-mileage'   # 1/mileage instead of mileage
+f5 <- 'lprice ~.+I(mileage^3)+I(mileage^2)' # mileage^2 and mileage^3 
+f6 <- 'lprice ~.+mileage:trim'              #mileage * trim 
+f7 <- 'lprice ~.+mileage:displacement'      #mileage * displacement
+f8 <- 'lprice ~.+mileage:trim+mileage:displacement' #mileage * (trim, displacement)
+f9 <- 'lprice ~.+color:isOneOwner'                  #color * oneowner
+f10 <- 'lprice ~.*isOneOwner'                       #everything interacted with isOneOwner
+f11 <- 'lprice ~.^2'                                #everything
+
+formulas <- c(f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11)
+rm(f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11)
+```
+
+```{r initial glm estimation, eval = F}
+### Full data set estimation
+# create empty data frame to throw results into
+full_penal_errors <- data.frame(ridge = double(),
+                     lasso = double(),
+                     enet = double(),
+                     formula = character(),
+                     stringsAsFactors = FALSE)
+
+sub_penal_errors <- data.frame(ridge = double(),
+                     lasso = double(),
+                     enet = double(),
+                     formula = character(),
+                     stringsAsFactors = FALSE)
+
+# Loop along the formula list and run the glmnet algo
+for (i in seq_along(formulas)) {
+  print(formulas[i])
+
+  ## Estimate for FULL training set
+  result <- glmnetPrediction(formulas[i], full_train, full_test)
+  full_penal_errors[i, 'ridge'] = result$ridge
+  full_penal_errors[i, 'lasso'] = result$lasso
+  full_penal_errors[i, 'enet'] = result$enet
+  full_penal_errors[i, 'formula'] = result$formula
+  
+  
+  ## Estimate for SUB training set
+  result <- glmnetPrediction(formulas[i], sub_train, sub_test)
+  sub_penal_errors[i, 'ridge'] = result$ridge
+  sub_penal_errors[i, 'lasso'] = result$lasso
+  sub_penal_errors[i, 'enet'] = result$enet
+  sub_penal_errors[i, 'formula'] = result$formula
+  
+}
+
+
+```
+
+
+```{r stepwise estimation, eval = F}
+### Estimation
+
+# create empty data frames for results
+full_step_errors <- data.frame(step = double(),
+                               formula = character(),
+                               stringsAsFactors = FALSE)
+
+
+sub_step_errors <- data.frame(step = double(),
+                              formula = character(),
+                              stringsAsFactors = FALSE)
+# Loop through formulas
+for (i in seq_along(formulas)){
+  print(formulas[i])
+  
+  # estimate for FULL training set
+  full_step_errors[i, 'formula'] = formulas[i]
+  full_step_errors[i, 'step'] = stepwisePrediction(formulas[i], full_train,
+                                                     full_test)
+  
+  # estimate for SUB training set
+  sub_step_errors[i, 'formula'] = formulas[i]  
+  sub_step_errors[i, 'step'] = stepwisePrediction(formulas[i], sub_train,
+                                                     sub_test)
+  
+}
+
+
+```
+
+```{r combine results, eval = F}
+full_errors <- inner_join(full_penal_errors, full_step_errors, by = 'formula') %>%
+  dplyr::select(step, ridge, enet, lasso, formula)
+
+sub_errors <- inner_join(sub_penal_errors, sub_step_errors, by = 'formula')
+
+rm(full_penal_errors, full_step_errors, sub_penal_errors, sub_step_errors) %>%
+  dplyr::select(step, ridge, enet, lasso, formula)
+```
+
+### Evaluation
+
+At this point we have the RMSE of the demeaned `lprice` variable for each model 
+that was run. To be more specific, for every formula specified above, we have 
+the RMSE for a elastic net, ridge, and lasso regression along with the RMSE of
+the best subset selection method. Combining the results will allow us to determine
+the highest performing model on each set of test data. 
+
+A secondary question we had was to see if the excluding observations containing
+`unsp` values made our models any more accurate. In order to make this across-set 
+comparison, we estimate an intercept-only model on the full data set and use the
+resulting RMSE as a way to measure how much better the subset performs. In
+essence, we want to answer the question: Does the predictive power of the model
+increase when we eliminate 'fuzzy' observations?
+
+We now use the ratio:
+
+$$\frac{RMSE_{0}}{RMSE_{t}},$$  
+
+where the numerator is the RMSE from the null model and the denominator is from
+the model specification we are testing. This will give us an approximation of how
+much 'better' the current model performs relative to the null. For example, a
+ratio of 3 implies that the error of the tested model is 3 times smaller than 
+that of the null. Furthermore, it allows us to move away from the interpretation
+of the RMSE, which is currently calculated with regards to the demeaned log of price.
+The outcome of the null model is stated below:
+
+```{r null model}
+full_null <- lm(lprice ~ 1, full_train)
+
+full_pred <- predict(full_null, full_test)
+
+full_rmse <- sqrt(mean((full_pred - full_test$lprice)^2))
+
+print(paste0("The RMSE of the null model using the full data is: ", round(full_rmse, 4)))
+```
+
+We now present the highest-performing model specification for each method and
+its associated performance ratio, in decreasing order.
+
+```{r relative performance, eval = F}
+full_relative_errors <- full_errors %>%
+  mutate_if(is.numeric, function(x) full_rmse/x)
+
+sub_relative_errors <- sub_errors %>%
+  mutate_if(is.numeric, function(x) full_rmse/x)
+```
+
+```{r present results}
+full_relative_errors <- read_csv('Data/temp_full_rel_errors.csv',
+                                 col_types = cols())
+
+sub_relative_errors <- read_csv('Data/temp_sub_rel_errors.csv',
+                                 col_types = cols())
+
+enet_form <- full_relative_errors$formula[which.max(full_relative_errors$enet)]
+ridge_form <- full_relative_errors$formula[which.max(full_relative_errors$ridge)]
+lasso_form <- full_relative_errors$formula[which.max(full_relative_errors$lasso)]
+step_form <- full_relative_errors$formula[which.max(full_relative_errors$step)]
+
+max_enet <- max(full_relative_errors$enet)
+max_ridge <- max(full_relative_errors$ridge)
+max_lasso <- max(full_relative_errors$lasso)
+max_step <- max(full_relative_errors$step)
+
+cat("Step: ", max_step, ",", step_form, '\n')
+cat("Elastic Net: ", max_enet, ",", enet_form, '\n') 
+cat("Lasso: ", max_lasso, ",", lasso_form, '\n') 
+cat("Ridge: ", max_ridge, ",", ridge_form, '\n')
+```
+
+The stepwise-selection method outperformed all forms of the penalized regression
+we tested, but by a very slim margin. We would be hesitant to conclude that one
+particular method is outweighed by another from these results. A broader set of 
+formulas could potentially reveal differences among the methods. The ridge model
+clearly underperformed relative to the rest of the bunch.
+
+Finally, we present the performance of the subsetted data models in the same fashion.
+(The order is the same as above for ease of comparison)
+
+```{r}
+enet_form <- sub_relative_errors$formula[which.max(sub_relative_errors$enet)]
+ridge_form <- sub_relative_errors$formula[which.max(sub_relative_errors$ridge)]
+lasso_form <- sub_relative_errors$formula[which.max(sub_relative_errors$lasso)]
+step_form <- sub_relative_errors$formula[which.max(sub_relative_errors$step)]
+
+max_enet <- max(sub_relative_errors$enet)
+max_ridge <- max(sub_relative_errors$ridge)
+max_lasso <- max(sub_relative_errors$lasso)
+max_step <- max(sub_relative_errors$step)
+
+cat("Step: ", max_step, ",", step_form, '\n')
+cat("Elastic Net: ", max_enet, ",", enet_form, '\n') 
+cat("Lasso: ", max_lasso, ",", lasso_form, '\n') 
+cat("Ridge: ", max_ridge, ",", ridge_form, '\n')
+
+```
+
+Interestingly, the results from this data set are quite different both in terms
+of model specification and test error results. The ridge still performs the worst,
+but its performance is pretty much on par with the results of the full data set.
+As for the other three methods, all selected model specifications were different
+from the previous iteration and their relative performance has increased considerably.
+Based on this evidence, we think there is reason to believe that the `unsp` values
+added in a significant amount of noise to the full data, making models based on that
+set less reliable.
+
+
+### Final Notes
+
+- A lot has been excluded from this report; pretty much all the code has been left 
+out because we felt that it wouldn't be particularly helpful for the reader. It 
+also would have likely doubled the length of this report. 
+
+- There is still much that could have been in terms of testing different methods;
+it would have been much smarter to write an algorithm that would update an existing
+formula instead of having to specify each individual formula
+
+- We could be more clear on what exactly the best-performing models turned 
+out to be. As it stands, we omit that entirely and never specify the actual coefficients
+of the model. We felt that it wasn't crucial to state them explicitly, but it
+probably would have been interesting to report.
+
+- Finally, we're not entirely sure if the relative performance ratio was the best
+metric to convey our results. It did allow us to ignore converting the RMSE back
+to USD and the interpretation was pretty simple, but it may not have been the best
+way of going about it.

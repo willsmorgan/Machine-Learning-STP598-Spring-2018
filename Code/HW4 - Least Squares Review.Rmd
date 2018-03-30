@@ -1,0 +1,289 @@
+---
+title: "HW4 - Least Squares Review"
+author: "William Morgan, Jared Scolaro, Mitchell O'Brien"
+date: "February 19, 2018"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, fig.align = 'center', fig.height = 3.5, fig.width = 5)
+
+libs <-  c("tidyverse", "e1071", "tm", "SnowballC", "knitr")
+lapply(libs, library, character.only = T)
+```
+
+## Problems
+
+1. Out-of-sample predictive performance of variable subsets
+
+2. Properties of Least Squares
+
+    2.1 $\hat{\beta}$ by matrix operations
+    
+    2.2 $\hat{\sigma}$ and standard errors
+    
+    2.3 Correlations
+    
+3. Orthogonalized Regression
+
+4. Predictive Variance
+
+5. R-squared
+
+***
+
+## 1. Out-of-sample predictive performance of variable subsets
+
+```{r}
+dta <- read_csv("Data/sim-reg-data.csv",
+                col_types = cols())
+```
+
+1a. Is $X_3$ really better than $X_1, X_2$ in terms of test error?
+
+Based on the class example, it is pretty obvious that $X_3$ outperformed $X_1, X_2$
+in nearly every model-estimation iteration. To be certain, we increase the number
+of iterations in the test to see if our conclusion changes.
+
+```{r}
+set.seed(1)
+rmse <- function(y, yhat){
+  sqrt(mean((y-yhat)^2))
+}
+
+test_err <-  matrix(nrow = 1000, ncol = 2)
+for (i in 1:1000){
+  train <- sample_frac(dta, .75)
+  test <-  setdiff(dta, train)
+  
+  lm12 <-  lm(y ~ x1 + x2, train)
+  test_err[i, 1] <- rmse(test$y, predict(lm12, test))
+  
+  lm3 <-  lm(y ~ x3, train)
+  test_err[i, 2] <-  rmse(test$y, predict(lm3, test))
+}
+
+colnames(test_err) <-  c('x_12', 'x_3')
+boxplot(test_err)
+```
+
+This is pretty solid evidence that having $X_3$ alone results in a better performing
+model (in terms of test error) than $X_1$ and $X_2$ together. 
+
+1b. Modify the code to compare the model containing $X_1$ and $X_2$ as predictors 
+against all subsets containing only one variable 
+
+```{r}
+test_err <-  matrix(nrow = 1000, ncol = 6)
+
+for (i in 1:1000){
+  train <- sample_frac(dta, .75)
+  test <-  setdiff(dta, train)
+  
+  lm12 <-  lm(y ~ x1 + x2, train)
+  test_err[i, 1] <- rmse(test$y, predict(lm12, test))
+  
+  lm1 <-  lm(y ~ x1, train)
+  test_err[i, 2] <-  rmse(test$y, predict(lm1, test))
+
+  lm2 <-  lm(y ~ x2, train)
+  test_err[i, 3] <-  rmse(test$y, predict(lm2, test))
+  
+  lm3 <-  lm(y ~ x3, train)
+  test_err[i, 4] <-  rmse(test$y, predict(lm3, test))
+  
+  lm4 <-  lm(y ~ x4, train)
+  test_err[i, 5] <-  rmse(test$y, predict(lm4, test))
+  
+  lm5 <-  lm(y ~ x5, train)
+  test_err[i, 6] <-  rmse(test$y, predict(lm5, test))
+  
+}
+
+colnames(test_err) <-  c('x_12', 'x_1', 'x_2', 'x_3', 'x_4', 'x_5')
+boxplot(test_err)
+```
+
+Based on the box plot, it is clear that the three models that include $X_1$ and/or $X_2$
+underperform compared to the models that exclude them. 
+
+***
+
+## 2. Properties of Least Squares
+
+#### 2.1 $\hat{\beta}$ by Matrix Operations
+
+- Compute $\hat{\beta}$ and check the first order conditions for the data from problem 1
+
+```{r, echo = TRUE}
+# Define model matrix
+X <- as.matrix(dta[, 2:6], ncol = 5)
+X <-  cbind(1, X)
+
+Y <- as.matrix(dta[, 1], ncol = 1)
+
+# Find (X'X)^-1
+X_tX_i <- t(X) %*% X %>%
+  solve()
+
+# Find Beta
+bhat <-  X_tX_i %*% t(X) %*% Y
+
+# Check FOCs
+t(X) %*% (Y - X %*% bhat)
+```
+
+
+#### 2.2 $\hat{\sigma}$ and Standard Errors
+
+Get $\hat{\sigma}$ and $se(\hat{\beta_i})$ for the data from problem 1 directly from
+the formulas using R matrix operations and vector calculations
+
+```{r, echo = T}
+# Grab predictions and find sample variance of Y
+yhat <-  X %*% bhat
+shat <-  (1/1994) * sum((Y - yhat)^2)
+
+# Find Std. Error of beta_hat
+inv = diag(solve(t(X) %*% X))
+std_err <- sqrt(inv * shat)
+
+# Grab results from lm() function
+fit <- lm(y ~ ., data = dta)
+lm_shat <-  summary(fit)$sigma
+lm_sterr <-  coef(summary(fit))[,2]
+
+cat('The direct calculation of sigma hat is ', shat, '\n')
+cat('The lm() calculation of sigmat is ', lm_shat, '\n')
+cat('The direct calculation of the standard errors is ', std_err, '\n')
+cat('The lm() calculation of the standard errors is ', lm_sterr, '\n')
+```
+
+#### 2.3 Correlations
+
+- 2.3a: How do the outputs of the regression between the demeaned and raw data compare?
+
+Only the intercept $\beta_0$ has been affected by the demeaning; Its estimate has
+increased to 1.211 and its standard error has decreased by a solid margin (relative
+to the standard error of the non-demeaned regression)
+
+- 2.3b: Why are the residuals uncorrelated with the fitted values?
+
+The residuals are uncorrelated with the fitted values by construction. Specifically,
+the first order condition that the gradient of the loss function equals 0 implies that the
+residuals $y - X\hat{\beta}$ are orthogonal (i.e. uncorrelated) to each column of $X$
+
+- 2.3b: Square the correlation between y and yhat; How does it compare with $R^2$?
+```{r}
+(.49334)^2
+```
+
+The squared correlation between y and yhat is equal to the $R^2$ from the regression
+(save for some rounding error)
+
+***
+
+## 3. Orthogonalized Regression
+
+#### 3a: How do the coefficients from the last regression compare to the previous?
+
+The estimates of the coefficients do not change, but the standard error of the
+estimates increase slightly
+
+#### 3b: How does the $e_5$ coefficient compare to the $x_5$ coefficient in the previous problem?
+
+The coefficients and their standard errors are equivalent
+
+#### 3c: What is this number? Confirm that this is the standard error for the coefficient of $x_5$
+
+The number outputted from the code is the standard error of the estimate for the coefficient on $e_5$
+
+```{r, echo = T}
+# Refit the data with x5 in the model
+fit <- lm(y~., dta)
+
+# Extract the standard error of the coefficient for x5
+coef(summary(fit))[6,2]
+```
+
+#### 3d: What is the $R^2$ from the regression of $x_5$ on $X_1, X_2, X_3, X_4$?
+
+Looking to the output that's already written on the assignment, we can see that
+the $R^2$ from that model is $.2433$
+
+#### 3e: Run the regression of y on just x5. How does the SE for the coefficient for x5 compare to the SE of the one in the full model? Explain why they are so different
+
+```{r}
+# Fit
+fit5 <- lm(y ~ x5, dta)
+
+# Get SE for coefficient for x5
+coef(summary(fit5))[2,2]
+```
+
+The large difference between the two standard errors is a result of multicollinearity
+between x_3, x_4, and x_5. This makes it difficult to explain how responsible each variable 
+is for variation in Y and leads to inflated standard errors.
+
+***
+
+## 4. Predictive Variance
+
+Suppose we have training data $(X,y)$ and $x_f$ at which we wish to predict the 
+future $Y_f$. Then our usual prediction is $\hat{Y_f} = x_f \hat{\beta}$. Obtain
+a nice matrix formula for:
+
+$$
+Var[E_f] = Var[Y_f - \hat{Y_f}]
+$$
+
+In this answer we use the fact that $Y$ are iid observations and thus have $cov(Y, Y') = 0$
+
+$$
+Var[E_f] = Var[Y_f] + Var[\hat{Y_f}] + 2cov[Y_f, \hat{Y_f}]
+$$
+$$
+= Var[Y_f] + Var[X_f \hat{\beta}]
+$$
+$$
+= \sigma^2 + X_f (\sigma^2 (X^TX)^{-1})X_f^T
+$$
+
+## 5. R-squared
+
+Show that the square of the correlation between y and the fitted values is indeed
+the same as the usual formula for R-squared
+
+$$
+cor(\hat{y}, y)^2 = \frac{\sum{(\hat{y_i} - \bar{y})^2}}{\sum{(y_i - \bar{y})^2}}
+$$
+To simplify the algebra of this a little bit, we assume that $Y$ is demeaned. 
+We begin with the formula for correlation between $y$ and $\hat{y}$:
+
+$$
+cor(y, \hat{y}) = \frac{\sum{y_i \hat{y_i}}}{\sqrt{\sum{y_i^2} * \sum{\hat{y_i}^2}}}
+$$
+
+Rewrite using inner product notation:
+$$
+cor(y, \hat{y}) = \frac{\langle y_i, \hat{y_i} \rangle}{\sqrt{\langle y_i, y_i \rangle}\sqrt{\langle \hat{y_i}, \hat{y_i} \rangle}}
+$$
+
+Note that since $\hat{y}$ and $\epsilon$ are orthogonal, the following statement holds:
+$$
+\langle \hat{y_i}, y \rangle = \langle \hat{y}, \hat{y} + \epsilon \rangle \\
+= \langle \hat{y}, \hat{y} \rangle + \langle \hat{y}, \epsilon \rangle \\
+= \langle \hat{y}, \hat{y} \rangle + 0 \\
+= \langle \hat{y}, \hat{y} \rangle
+$$
+
+
+Square the expression and reduce:
+$$
+cor(y, \hat{y}) = \frac{\langle \hat{y_i}, \hat{y_i} \rangle}{\langle y_i, y_i \rangle}
+$$
+Square the previous expression to get the statement we sought to show. 
+
+
+
+
