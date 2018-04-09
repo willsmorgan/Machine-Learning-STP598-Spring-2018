@@ -1,0 +1,123 @@
+---
+title: "HW 7 - Neural Networks"
+author: "William Morgan, Jared Scolaro, Mitch O'Brien"
+date: "April 9, 2018"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+rm(list = ls())
+set.seed(1)
+knitr::opts_chunk$set(echo = F, fig.align = 'center',
+                      fig.height = 3.5, fig.width = 5, warning = F)
+
+libs <-  c('tidyverse', 'purrr', 'doParallel', 'keras')
+
+lapply(libs, library, character.only = T)
+```
+
+***
+
+## 1. Boston Housing with a Single Layer
+
+- Fit the model with 100 units, decay = .001, and plot the fits. How does it look?
+Try running the fit at least twice to see that it changes
+
+
+```{r get-data}
+# load and standardize `lstat`
+data <- MASS::Boston %>%
+  mutate(lstat = scale(lstat))
+
+x <- data$lstat %>%
+  as.matrix()
+
+y <- data$medv %>%
+  as.matrix()
+
+
+```
+
+```{r prep model, echo = TRUE}
+model <- keras_model_sequential()
+
+model %>%
+  layer_dense(units = 100,                        # input layer
+              activation = 'sigmoid',
+              input_shape = c(1),
+              use_bias = TRUE) %>%
+  layer_activity_regularization(l2 = .001) %>%    # regularization on input
+  layer_dense(units = 1)                          # output layer
+  
+model %>%
+  compile(
+    loss = 'mean_squared_error',
+    optimizer = optimizer_sgd())
+```
+
+```{r fit-model twice}
+# round 1
+model %>%
+  fit(x, y, verbose = 2)
+
+pred1 <- predict_on_batch(model, x)
+
+# round 2
+model  %>%
+  fit(x, y, verbose = 2)
+
+pred2 <- predict_on_batch(model, x)
+
+```
+
+```{r plot preds}
+data <- cbind(data, pred1, pred2)
+
+ggplot(data) + 
+  geom_point(aes(lstat, medv)) +
+  geom_line(aes(lstat, pred1), col = 'blue', size = 1) +
+  geom_line(aes(lstat, pred2), col = 'red', size = 1)
+```
+
+The two fits are pretty similar, as expected. Furthermore, both of them appear
+to be pretty simplistic in the way they describe the relationship between
+`lstat` and `medv`. It might be reasonable to reduce the amount of regularization
+(i.e. increase complexity) we're adding in order to capture more non-linearity. 
+
+
+- Redo the loop over decay values with 100 units. How does it look now? Do we 
+need 100? Will decay be more important with 100 than it was with 5 units?
+
+```{r decay search}
+decay_vals <- c(.5, .1, .01, .005, .0025, .001, .0001, .00001)
+
+predictions <- list()
+for (i in seq_along(decay_vals)) {
+  model <- keras_model_sequential()
+
+  model %>%
+    layer_dense(units = 100,                                 # input layer
+                activation = 'sigmoid',
+                input_shape = c(1),
+                use_bias = TRUE) %>%
+    layer_activity_regularization(l2 = decay_vals[i]) %>%    # regularization on input
+    layer_dense(units = 1)                                   # output layer
+    
+  model %>%
+    compile(
+      loss = 'mean_squared_error',
+      optimizer = optimizer_sgd())
+
+  model %>% fit(x, y, verbose = 0)
+  
+  predictions[[i]] <- predict_on_batch(model, x)
+}
+
+names(predictions) <- decay_val
+predictions <- data.frame(predictions)
+
+
+
+```
+
+
