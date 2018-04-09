@@ -120,4 +120,12 @@ predictions <- data.frame(predictions)
 
 ```
 
+We should expect to see regularization have less of an effect on the model containing
+only 5 units, as there are significantly many more predictors in the network 
+with 100 units. The regularization will thus have a larger effect on the absolute 
+value of each individual parameter in the 100-unit model compared to the 5-unit model.
+
+
+TODO: plot results of looping through decays
+
 
