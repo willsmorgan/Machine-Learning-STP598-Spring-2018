@@ -113,7 +113,7 @@ for (i in seq_along(decay_vals)) {
   predictions[[i]] <- predict_on_batch(model, x)
 }
 
-names(predictions) <- decay_val
+names(predictions) <- decay_vals
 predictions <- data.frame(predictions)
 
 
